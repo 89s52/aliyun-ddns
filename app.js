@@ -9,6 +9,7 @@ const config = require('./config.json');
 const getTarget = function (req) {
   return {
     hostname: url.parse(req.url, true).query.hostname,
+    type: url.parse(req.url, true).query.type || "A",
     ip: url.parse(req.url, true).query.ip
     || req.headers[config.clientIpHeader.toLowerCase()]
     || req.connection.remoteAddress
@@ -23,24 +24,47 @@ const getTarget = function (req) {
 // 如果记录存在, ip 有变化, 会更新 ip, 并返回 updated
 // 如果阿里云端返回 400 错误, 则返回 error
 const updateRecord = function (target, callback) {
+
+  // Normalize target url name.
+  let domainParts = target.hostname.split('.');
+  if(domainParts[domainParts.length] === '') {
+    // Removing tail dot.
+    domainParts.pop();
+  }
+
+  let RR = (domainParts.length > 2) ?
+      domainParts[0] : '@';
+  let normHostname = '';
+  if(domainParts.length > 2) {
+      // Remove only the first element, and then copy rest of it.
+      domainParts.shift();
+  }
+
+  domainParts.forEach(ele => {
+    normHostname += ele + '.';
+  });
+
+  normHostname = normHostname.substr(0, normHostname.length - 1);
+
   const describeParams = {
     Action: 'DescribeDomainRecords',
-    DomainName: target.hostname.split('.').slice(1).join('.')
+    DomainName: normHostname
   };
-  const updateParmas = {
+  const updateParams = {
     Action: 'UpdateDomainRecord',
-    RecordId: '',
-    RR: target.hostname.split('.')[0],
-    Type: 'A',
+    // RecordId: '',
+    RR: RR,
+    Type: target.type,
     Value: target.ip
   };
-  const addParmas = {
+  const addParams = {
     Action: 'AddDomainRecord',
     DomainName: describeParams.DomainName,
-    RR: updateParmas.RR,
-    Type: updateParmas.Type,
-    Value: updateParmas.Value
+    RR: updateParams.RR,
+    Type: updateParams.Type,
+    Value: updateParams.Value
   };
+
   // 首先获取域名信息, 目的是获取要更新的域名的 RecordId
   http.request({
     host: alidns.ALIDNS_HOST,
@@ -55,24 +79,33 @@ const updateRecord = function (target, callback) {
         // 获取要更新的域名的 RecordId, 并检查是否需要更新
         let shouldUpdate = false;
         let shouldAdd = true;
+
+        if(!result.DomainRecords) {
+            console.log(result);
+            return;
+        }
+
         result.DomainRecords.Record
-          .filter(record => record.RR === updateParmas.RR)
+          .filter(record => record.RR === updateParams.RR &&
+                 record.Type === updateParams.Type )
           .forEach(record => {
             shouldAdd = false;
-            if (record.Value !== updateParmas.Value) {
+            if (record.Value !== updateParams.Value) {
               shouldUpdate = true;
-              updateParmas.RecordId = record.RecordId;
+              updateParams.RecordId = record.RecordId;
             }
           });
         if (shouldUpdate) {
           // 更新域名的解析
           http.request({
             host: alidns.ALIDNS_HOST,
-            path: alidns.getPath(updateParmas)
+            path: alidns.getPath(updateParams)
           }, res => {
             if (res.statusCode === 200) {
               callback('updated');
             } else {
+              console.err("Failed to update target error");
+              res.pipe(process.stderr);
               callback('error');
             }
           }).end();
@@ -80,7 +113,7 @@ const updateRecord = function (target, callback) {
           // 增加新的域名解析
           http.request({
             host: alidns.ALIDNS_HOST,
-            path: alidns.getPath(addParmas)
+            path: alidns.getPath(addParams)
           }, res => {
             if (res.statusCode === 200) {
               callback('added');
